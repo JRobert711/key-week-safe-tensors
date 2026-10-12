@@ -1,0 +1,8 @@
+# ToolLighthouse - Dependencias del proyecto
+# Vision artificial, modelos YOLO, integracion serie y utilidades
+
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+pyserial>=3.5
+onnx>=1.14.0
+pyyaml>=6.0

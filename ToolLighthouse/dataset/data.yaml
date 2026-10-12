@@ -1,0 +1,18 @@
+# ToolLighthouse - Configuracion del Dataset para YOLOv8
+# Compatible con exportaciones nativas YOLO de Label Studio
+
+path: .  # Directorio raiz del dataset (relativo a la ubicacion de data.yaml)
+train: images/train
+val: images/val
+
+# Diccionario oficial de clases del laboratorio (IDs 0 a 8)
+names:
+  0: cautin
+  1: multimetro_digital
+  2: multimetro_analogico
+  3: estacion_soldadura
+  4: caja_sensores
+  5: ventilador_pasco
+  6: bascula
+  7: capacitor_variable
+  8: fuente_voltaje

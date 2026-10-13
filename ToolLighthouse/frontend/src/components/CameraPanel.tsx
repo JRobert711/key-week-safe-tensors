@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import { BackendUrlField } from "@/components/BackendUrlField";
 import { CameraView } from "@/components/CameraView";
 import { CaptureControls } from "@/components/CaptureControls";
+import { HudOverlay } from "@/components/HudOverlay";
 import { useCamera } from "@/hooks/useCamera";
 import { useCapture } from "@/hooks/useCapture";
+import { useLiveDetection } from "@/hooks/useLiveDetection";
 
 const STORAGE_KEY = "toollighthouse:backend-url";
 
@@ -16,7 +18,9 @@ const STORAGE_KEY = "toollighthouse:backend-url";
 export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boolean }) {
   const camera = useCamera();
   const [backendUrl, setBackendUrl] = useState("");
-  const capture = useCapture(camera.videoRef, allowBackendUrl ? backendUrl : undefined);
+  const effectiveBackendUrl = allowBackendUrl ? backendUrl : undefined;
+  const capture = useCapture(camera.videoRef, effectiveBackendUrl);
+  const live = useLiveDetection(camera.videoRef, camera.status === "active", effectiveBackendUrl);
 
   // Recordar la última URL usada. El almacenamiento puede no estar disponible.
   useEffect(() => {
@@ -39,8 +43,11 @@ export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boo
 
   return (
     <div className="panel">
-      <CameraView camera={camera} />      
-      <CaptureControls capture={capture} cameraActive={camera.status === "active"} />
+      <CameraView
+        camera={camera}
+        overlay={<HudOverlay captureStatus={capture.status} result={capture.result} live={live} />}
+      />      
+      <CaptureControls capture={capture} live={live} cameraActive={camera.status === "active"} />
     </div>
   );
 }

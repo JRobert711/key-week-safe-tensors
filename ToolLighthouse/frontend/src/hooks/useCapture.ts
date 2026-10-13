@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CaptureError, captureFrame } from "@/lib/captureFrame";
+import { captureFrame } from "@/lib/captureFrame";
 import { SendError, sendFrame } from "@/lib/captureApi";
+import { userMessageOf } from "@/lib/userMessage";
 import type { DetectionResult } from "@/types/detection";
 
 export type CaptureStatus = "idle" | "capturing" | "sending" | "success" | "error";
@@ -52,11 +53,7 @@ export function useCapture(
       setStatus("success");
     } catch (e) {
       if (e instanceof SendError && e.code === "aborted") return;
-      setError(
-        e instanceof CaptureError || e instanceof SendError
-          ? e.userMessage
-          : "Ocurrió un error inesperado. Vuelve a intentarlo.",
-      );
+      setError(userMessageOf(e));
       setStatus("error");
     } finally {
       inFlightRef.current = false;

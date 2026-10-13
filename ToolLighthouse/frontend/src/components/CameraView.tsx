@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import type { UseCamera } from "@/hooks/useCamera";
 
 const STATUS_LABEL: Record<UseCamera["status"], string> = {
@@ -11,7 +12,8 @@ const STATUS_LABEL: Record<UseCamera["status"], string> = {
   error: "Error de cámara",
 };
 
-export function CameraView({ camera }: { camera: UseCamera }) {
+/** `overlay` se dibuja encima del video solo mientras la cámara está activa (p. ej. el HUD). */
+export function CameraView({ camera, overlay }: { camera: UseCamera; overlay?: ReactNode }) {
   const { videoRef, status, message, devices, selectedDeviceId, start, stop, selectDevice } = camera;
   const isActive = status === "active";
   const isBusy = status === "requesting";
@@ -26,6 +28,7 @@ export function CameraView({ camera }: { camera: UseCamera }) {
             {isBusy ? STATUS_LABEL.requesting : "Pulsa Iniciar cámara para ver el video."}
           </p>
         )}
+        {isActive && overlay}
       </div>
 
       <p className="status" data-status={status} role="status">

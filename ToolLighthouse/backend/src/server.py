@@ -4,7 +4,14 @@ ToolLighthouse - Backend HTTP para el frontend Next.js
 Expone POST /detect: recibe un fotograma JPEG (multipart, campo "image"), ejecuta
 YOLOv8 y devuelve la mejor deteccion con el contrato que espera el frontend:
 
-    { "class": str | null, "confidence": float | null, "detections": int }
+    {
+      "class": str | null, "confidence": float | null, "detections": int,
+      "boxes": [{ "class": str, "confidence": float, "x1": float, "y1": float, "x2": float, "y2": float }],
+      "model": "custom" | "fallback"
+    }
+
+Las coordenadas de "boxes" estan normalizadas (0 a 1) respecto a la imagen recibida.
+"boxes" va ordenado de mayor a menor confianza y se limita a MAX_BOXES.
 
 Reutiliza la logica de detect.py (clases del proyecto y resolucion de pesos).
 No toca UART ni la camara: eso sigue siendo responsabilidad de detect.py.
@@ -41,6 +48,8 @@ logger = logging.getLogger("DetectAPI")
 CONF = float(os.getenv("CONF", "0.70"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(1_048_576)))
 JPEG_MAGIC = b"\xff\xd8\xff"
+# El frontend descarta mas de 50 cajas; se limita aqui para no enviar datos que se tiran.
+MAX_BOXES = 50
 
 # El modelo YOLO no es seguro para inferencias concurrentes: se serializa el acceso.
 _infer_lock = threading.Lock()
@@ -75,19 +84,44 @@ def _class_name(model, cls_id: int, is_fallback: bool) -> str:
 
 def _infer(frame: np.ndarray) -> Dict[str, Any]:
     model = app.state.model
+    is_fallback = app.state.is_fallback
+    model_kind = "fallback" if is_fallback else "custom"
+
     with _infer_lock:
         results = model(frame, conf=CONF, verbose=False)
 
     boxes = results[0].boxes
     if boxes is None or len(boxes) == 0:
-        return {"class": None, "confidence": None, "detections": 0}
+        return {"class": None, "confidence": None, "detections": 0, "boxes": [], "model": model_kind}
 
-    best = max(boxes, key=lambda b: float(b.conf[0]))
-    cls_id = int(best.cls[0])
+    # xyxyn: esquinas normalizadas (0 a 1) respecto a la imagen decodificada.
+    coords = boxes.xyxyn.tolist()
+    confs = boxes.conf.tolist()
+    class_ids = [int(c) for c in boxes.cls.tolist()]
+
+    detections = sorted(
+        (
+            {
+                "class": _class_name(model, cls_id, is_fallback),
+                "confidence": round(float(conf), 4),
+                "x1": round(float(x1), 4),
+                "y1": round(float(y1), 4),
+                "x2": round(float(x2), 4),
+                "y2": round(float(y2), 4),
+            }
+            for cls_id, conf, (x1, y1, x2, y2) in zip(class_ids, confs, coords)
+        ),
+        key=lambda d: d["confidence"],
+        reverse=True,
+    )
+
+    best = detections[0]
     return {
-        "class": _class_name(model, cls_id, app.state.is_fallback),
-        "confidence": round(float(best.conf[0]), 4),
-        "detections": len(boxes),
+        "class": best["class"],
+        "confidence": best["confidence"],
+        "detections": len(detections),
+        "boxes": detections[:MAX_BOXES],
+        "model": model_kind,
     }
 
 

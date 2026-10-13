@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CaptureError, captureFrame } from "@/lib/captureFrame";
 import { SendError, sendFrame } from "@/lib/captureApi";
 import { evaluate, pushSample, type Sample } from "@/lib/stability";
+import type { DetectionBox, ModelKind } from "@/types/detection";
 import { userMessageOf } from "@/lib/userMessage";
 
 // Parámetros (equivalentes a los de detect.py).
@@ -26,6 +27,9 @@ interface LiveSnapshot {
   count: number;
   fps: number | null;
   error: string | null;
+  /** Cajas del último fotograma; null si el backend no las envía. */
+  boxes: DetectionBox[] | null;
+  model: ModelKind | null;
 }
 
 export interface UseLiveDetection extends LiveSnapshot {
@@ -44,6 +48,8 @@ const INITIAL: LiveSnapshot = {
   count: 0,
   fps: null,
   error: null,
+  boxes: null,
+  model: null,
 };
 
 /** Espera `ms` o hasta que se cancele; nunca rechaza. */
@@ -142,7 +148,17 @@ export function useLiveDetection(
 
           history = pushSample(history, { class: detection.class, confidence: detection.confidence }, HISTORY_SIZE);
           const { official, confidence, candidate, count } = evaluate(history, MIN_FRAMES);
-          setSnapshot({ phase: "running", official, confidence, candidate, count, fps, error: null });
+          setSnapshot({
+            phase: "running",
+            official,
+            confidence,
+            candidate,
+            count,
+            fps,
+            error: null,
+            boxes: detection.boxes ?? null,
+            model: detection.model ?? null,
+          });
         } catch (e) {
           if (signal.aborted || (e instanceof SendError && e.code === "aborted")) return;
 

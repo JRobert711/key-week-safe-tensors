@@ -1,3 +1,4 @@
+import { parseDetectionResult } from "@/lib/detectionContract";
 import type { DetectionResult } from "@/types/detection";
 
 /** Servicio HTTP: envía un fotograma a /api/capture. No depende de React ni del DOM. */
@@ -58,15 +59,6 @@ async function errorMessage(response: Response): Promise<string> {
   return httpMessage(response.status);
 }
 
-function parseResult(data: unknown): DetectionResult | null {
-  if (typeof data !== "object" || data === null) return null;
-  const { class: cls, confidence, detections } = data as Record<string, unknown>;
-  if (cls !== null && typeof cls !== "string") return null;
-  if (confidence !== null && typeof confidence !== "number") return null;
-  if (typeof detections !== "number") return null;
-  return { class: cls, confidence, detections };
-}
-
 export async function sendFrame(
   frame: Blob,
   { endpoint = "/api/capture", timeoutMs = 15_000, signal, backendUrl }: SendOptions = {},
@@ -107,7 +99,7 @@ export async function sendFrame(
       throw new SendError("network", "No se pudo conectar con el servidor. Revisa tu conexión.");
     }
 
-    const result = parseResult(data);
+    const result = parseDetectionResult(data);
     if (!result) {
       throw new SendError("invalid-response", "El servidor devolvió una respuesta que no se entiende.");
     }

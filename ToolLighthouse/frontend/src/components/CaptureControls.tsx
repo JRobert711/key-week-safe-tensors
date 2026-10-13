@@ -7,9 +7,12 @@ interface Props {
   capture: UseCapture;
   live: UseLiveDetection;
   cameraActive: boolean;
+  /** Fase 3: cajas sobre el video y modelo en el HUD. */
+  showDetails: boolean;
+  onToggleDetails: () => void;
 }
 
-export function CaptureControls({ capture, live, cameraActive }: Props) {
+export function CaptureControls({ capture, live, cameraActive, showDetails, onToggleDetails }: Props) {
   const { status, error, busy, captureAndSend } = capture;
 
   return (
@@ -25,6 +28,9 @@ export function CaptureControls({ capture, live, cameraActive }: Props) {
           disabled={!cameraActive}
         >
           {live.running ? "Detener modo en vivo" : "Iniciar modo en vivo"}
+        </button>
+        <button type="button" className="secondary" aria-pressed={showDetails} onClick={onToggleDetails}>
+          Cajas y modelo
         </button>
         {!cameraActive && <span className="hint">Inicia la cámara para capturar.</span>}
         {live.running && <span className="hint">Modo en vivo activo: la captura manual está desactivada.</span>}

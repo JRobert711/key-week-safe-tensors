@@ -3,7 +3,7 @@
 import type { CaptureStatus } from "@/hooks/useCapture";
 import type { UseLiveDetection } from "@/hooks/useLiveDetection";
 import { formatClass } from "@/lib/formatClass";
-import type { DetectionResult } from "@/types/detection";
+import type { DetectionResult, ModelKind } from "@/types/detection";
 
 type Tone = "active" | "idle" | "busy" | "error";
 
@@ -11,6 +11,8 @@ interface Props {
   captureStatus: CaptureStatus;
   result: DetectionResult | null;
   live: UseLiveDetection;
+  /** Fase 3: muestra el modelo (y avisa si el backend no lo informa). */
+  showDetails?: boolean;
 }
 
 function describeLive(live: UseLiveDetection): { label: string; tone: Tone } {
@@ -47,9 +49,16 @@ function describeManual({ captureStatus, result }: Pick<Props, "captureStatus" |
 }
 
 /** Panel de telemetría sobre el video, equivalente al HUD de draw_hud en detect.py. */
-export function HudOverlay({ captureStatus, result, live }: Props) {
+export function HudOverlay({ captureStatus, result, live, showDetails = false }: Props) {
   const { label, tone } = live.running ? describeLive(live) : describeManual({ captureStatus, result });
   const showLiveStats = live.running && live.phase !== "starting" && live.phase !== "retrying";
+
+  // Modelo del último resultado disponible (null = todavía no hay respuesta).
+  const hasResponse = live.running ? live.phase === "running" : captureStatus === "success" && result !== null;
+  const model: ModelKind | null = live.running ? live.model : (result?.model ?? null);
+  const modelLine = showDetails && hasResponse && (
+    <p className="hud-meta">Modelo: {model ? model.toUpperCase() : "no informado por el backend"}</p>
+  );
 
   return (
     <div className="hud">
@@ -70,6 +79,7 @@ export function HudOverlay({ captureStatus, result, live }: Props) {
                 {live.candidate && !live.official && ` · ${formatClass(live.candidate)}`}
               </p>
               <p className="hud-meta">FPS: {live.fps !== null ? live.fps.toFixed(1) : "—"}</p>
+              {modelLine}
             </>
           )}
           {live.error && (
@@ -87,6 +97,7 @@ export function HudOverlay({ captureStatus, result, live }: Props) {
           </p>
         )
       )}
+      {!live.running && modelLine}
     </div>
   );
 }

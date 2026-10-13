@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { parseDetectionResult } from "@/lib/detectionContract";
 import { getServerConfig, isClientBackendUrlEnabled } from "@/lib/server-config";
 
 /**
@@ -7,7 +8,8 @@ import { getServerConfig, isClientBackendUrlEnabled } from "@/lib/server-config"
  *
  * Contrato con el cliente (src/lib/captureApi.ts):
  *   entrada : multipart/form-data con el campo "image" (JPEG)
- *   salida  : { class, confidence, detections } o { error, message } con estado HTTP
+ *   salida  : { class, confidence, detections, boxes?, model? } o { error, message } con estado HTTP
+ *            (src/lib/detectionContract.ts valida y descarta cualquier otro campo)
  * GET: solo si ALLOW_CLIENT_BACKEND_URL=true, muestra una página oculta (no enlazada desde
  * la app) para pegar la URL del backend y probar la conexión. Si no, responde 405.
  * Otros métodos HTTP no están exportados: Next.js responde 405 automáticamente.
@@ -29,16 +31,6 @@ function isJpeg(buffer: ArrayBuffer): boolean {
   if (buffer.byteLength < 3) return false;
   const [a, b, c] = new Uint8Array(buffer, 0, 3);
   return a === 0xff && b === 0xd8 && c === 0xff;
-}
-
-/** Solo se reenvían los tres campos del contrato; cualquier otro dato del backend se descarta. */
-function toDetectionResult(data: unknown) {
-  if (typeof data !== "object" || data === null) return null;
-  const { class: cls, confidence, detections } = data as Record<string, unknown>;
-  if (cls !== null && typeof cls !== "string") return null;
-  if (confidence !== null && typeof confidence !== "number") return null;
-  if (typeof detections !== "number") return null;
-  return { class: cls, confidence, detections };
 }
 
 /**
@@ -279,7 +271,7 @@ export async function POST(request: Request) {
   }
 
   // 4. Validar y devolver únicamente el contrato esperado.
-  const result = toDetectionResult(payload);
+  const result = parseDetectionResult(payload);
   if (!result) {
     console.error("[capture] el backend devolvió una respuesta con formato inesperado");
     return fail(502, "upstream-invalid", "El servicio de detección devolvió una respuesta inválida.");

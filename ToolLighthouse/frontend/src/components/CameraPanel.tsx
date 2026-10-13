@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { BoxesLayer } from "@/components/BoxesLayer";
 import { BackendUrlField } from "@/components/BackendUrlField";
 import { CameraView } from "@/components/CameraView";
 import { CaptureControls } from "@/components/CaptureControls";
@@ -18,6 +19,8 @@ const STORAGE_KEY = "toollighthouse:backend-url";
 export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boolean }) {
   const camera = useCamera();
   const [backendUrl, setBackendUrl] = useState("");
+  // Fase 3: cajas sobre el video y modelo en el HUD.
+  const [showDetails, setShowDetails] = useState(false);
   const effectiveBackendUrl = allowBackendUrl ? backendUrl : undefined;
   const capture = useCapture(camera.videoRef, effectiveBackendUrl);
   const live = useLiveDetection(camera.videoRef, camera.status === "active", effectiveBackendUrl);
@@ -41,13 +44,35 @@ export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boo
     }
   }
 
+  const boxes = live.running
+    ? (live.boxes ?? [])
+    : capture.status === "success"
+      ? (capture.result?.boxes ?? [])
+      : [];
+
   return (
     <div className="panel">
       <CameraView
         camera={camera}
-        overlay={<HudOverlay captureStatus={capture.status} result={capture.result} live={live} />}
+        overlay={
+          <>
+            {showDetails && <BoxesLayer videoRef={camera.videoRef} boxes={boxes} />}
+            <HudOverlay
+              captureStatus={capture.status}
+              result={capture.result}
+              live={live}
+              showDetails={showDetails}
+            />
+          </>
+        }
       />      
-      <CaptureControls capture={capture} live={live} cameraActive={camera.status === "active"} />
+      <CaptureControls
+        capture={capture}
+        live={live}
+        cameraActive={camera.status === "active"}
+        showDetails={showDetails}
+        onToggleDetails={() => setShowDetails((v) => !v)}
+      />
     </div>
   );
 }

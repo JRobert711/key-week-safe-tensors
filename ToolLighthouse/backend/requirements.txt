@@ -6,3 +6,9 @@ opencv-python>=4.8.0
 pyserial>=3.5
 onnx>=1.14.0
 pyyaml>=6.0
+
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+ultralytics>=8.0
+numpy

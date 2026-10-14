@@ -45,6 +45,22 @@ except ImportError:
 
 logger = logging.getLogger("DetectAPI")
 
+# Voz (Fish Audio): modulo aislado. Si no se puede importar, el servidor arranca igual sin voz.
+try:
+    try:
+        from voice.api import router as voice_router, shutdown_voice, startup_voice
+    except ImportError:
+        from src.voice.api import router as voice_router, shutdown_voice, startup_voice
+except Exception:  # un fallo de voz nunca debe impedir la deteccion
+    logger.exception("No se pudo cargar el modulo de voz; el servidor arranca sin voz.")
+    voice_router = None
+
+    async def startup_voice(app):  # type: ignore[misc]
+        return None
+
+    async def shutdown_voice(app):  # type: ignore[misc]
+        return None
+
 CONF = float(os.getenv("CONF", "0.70"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(1_048_576)))
 JPEG_MAGIC = b"\xff\xd8\xff"
@@ -56,7 +72,7 @@ _infer_lock = threading.Lock()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _detector_lifespan(app: FastAPI):
     from ultralytics import YOLO
 
     weights_path, is_fallback = resolve_model_weights(os.getenv("WEIGHTS"))
@@ -72,7 +88,20 @@ async def lifespan(app: FastAPI):
     yield
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # La voz se levanta y se apaga alrededor del detector; sus fallos no se propagan.
+    await startup_voice(app)
+    try:
+        async with _detector_lifespan(app):
+            yield
+    finally:
+        await shutdown_voice(app)
+
+
 app = FastAPI(title="ToolLighthouse API", lifespan=lifespan)
+if voice_router is not None:
+    app.include_router(voice_router)
 
 
 def _class_name(model, cls_id: int, is_fallback: bool) -> str:

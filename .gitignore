@@ -1,0 +1,23 @@
+node_modules/
+.next/
+.env/
+.venv/
+__pycache__/
+*.pt
+runs/
+out/
+build/
+next-env.d.ts
+*.tsbuildinfo
+audio_out/
+
+# Variables locales y credenciales
+.env
+.env.local
+.env.*.local
+
+npm-debug.log*
+.DS_Store
+
+#Pruebas de FISH
+*.mp3

@@ -1,0 +1,9 @@
+bascula
+caja_sensores
+capacitor_variable
+cautin
+estacion_soldadura
+fuente_voltaje
+multimetro_analogico
+multimetro_digital
+ventilador_pasco

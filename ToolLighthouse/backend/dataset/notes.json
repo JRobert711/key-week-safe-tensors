@@ -1,0 +1,45 @@
+{
+  "categories": [
+    {
+      "id": 0,
+      "name": "bascula"
+    },
+    {
+      "id": 1,
+      "name": "caja_sensores"
+    },
+    {
+      "id": 2,
+      "name": "capacitor_variable"
+    },
+    {
+      "id": 3,
+      "name": "cautin"
+    },
+    {
+      "id": 4,
+      "name": "estacion_soldadura"
+    },
+    {
+      "id": 5,
+      "name": "fuente_voltaje"
+    },
+    {
+      "id": 6,
+      "name": "multimetro_analogico"
+    },
+    {
+      "id": 7,
+      "name": "multimetro_digital"
+    },
+    {
+      "id": 8,
+      "name": "ventilador_pasco"
+    }
+  ],
+  "info": {
+    "year": 2026,
+    "version": "1.0",
+    "contributor": "Label Studio"
+  }
+}

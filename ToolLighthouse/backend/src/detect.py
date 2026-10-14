@@ -282,6 +282,9 @@ def main() -> None:
     prev_time = time.time()
     fps = 0.0
 
+    # Ultima clase que estuvo activa de forma estable (para evento de desaparicion)
+    last_active_class: Optional[int] = None
+
     logger.info("=" * 60)
     logger.info("  SISTEMA TOOLLIGHTHOUSE ACTIVO EN TIEMPO REAL")
     logger.info("  - Umbral de confianza:  >= {:.2f}".format(args.conf))
@@ -338,11 +341,24 @@ def main() -> None:
                 stability_count = counts.get(None, 0)
 
             # Despachar evento al microcontrolador (envia unicamente si el estado cambio)
-            state_changed = serial_ctrl.send_class_event(official_class)
-            if state_changed:
-                target_byte = serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
-                cls_desc = PROJECT_CLASSES.get(official_class, "REPOSO") if official_class is not None else "REPOSO"
-                logger.info(f"[TRANSICION ESTABLE] Herramienta: {cls_desc} -> Byte: '{target_byte}'")
+            if official_class is not None:
+                # --- APARICION ESTABLE ---
+                state_changed = serial_ctrl.send_class_event(official_class)
+                if state_changed:
+                    last_active_class = official_class
+                    target_byte = serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
+                    cls_desc = PROJECT_CLASSES.get(official_class, f"Clase {official_class}")
+                    logger.info(f"[APARICION ESTABLE]  Herramienta: {cls_desc} -> Byte: '{target_byte}'")
+            else:
+                # --- DESAPARICION ESTABLE ---
+                # Si habia un objeto activo, enviar su byte negativo una sola vez
+                if last_active_class is not None:
+                    state_changed = serial_ctrl.send_disappearance_event(last_active_class)
+                    if state_changed:
+                        target_byte = serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
+                        cls_desc = PROJECT_CLASSES.get(last_active_class, f"Clase {last_active_class}")
+                        logger.info(f"[DESAPARICION ESTABLE] Herramienta: {cls_desc} -> Byte: '{target_byte}'")
+                        last_active_class = None  # Limpiar para no re-enviar
 
             # Generar frame visual con cajas delimitadoras dibujadas por YOLO
             annotated_frame = results[0].plot()

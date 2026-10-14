@@ -25,10 +25,12 @@ class SerialController:
     - Autoconexion con retardo de seguridad DTR (2s).
     - Tolerancia a fallos: fallback automatico a modo MOCK si no se detecta el hardware.
     - Mapeo estricto de IDs de clases (0-8 -> b'1'-b'9') y reposo (b'0').
+    - Eventos de APARICION: byte positivo (b'1'..b'9') al confirmar deteccion estable.
+    - Eventos de DESAPARICION: byte negativo (b'-1'..b'-9') al confirmar ausencia estable.
     - Filtro de transmision para disparar eventos exclusivamente en cambios de estado.
     """
 
-    # Mapeo oficial de clases ToolLighthouse a bytes UART
+    # Mapeo oficial de clases ToolLighthouse a bytes UART (aparicion)
     CLASS_BYTE_MAP = {
         None: b'0',  # Reposo / Sin deteccion
         -1: b'0',    # Reposo alternativo
@@ -41,6 +43,19 @@ class SerialController:
         6: b'7',     # bascula -> Zona 7
         7: b'8',     # capacitor_variable -> Zona 8
         8: b'9',     # fuente_voltaje -> Zona 9
+    }
+
+    # Mapeo de clases a bytes UART para eventos de DESAPARICION (signo negativo)
+    CLASS_BYTE_MAP_NEG = {
+        0: b'-1',    # cautin desaparecio
+        1: b'-2',    # multimetro_digital desaparecio
+        2: b'-3',    # multimetro_analogico desaparecio
+        3: b'-4',    # estacion_soldadura desaparecio
+        4: b'-5',    # caja_sensores desaparecio
+        5: b'-6',    # ventilador_pasco desaparecio
+        6: b'-7',    # bascula desaparecio
+        7: b'-8',    # capacitor_variable desaparecio
+        8: b'-9',    # fuente_voltaje desaparecio
     }
 
     def __init__(
@@ -104,8 +119,8 @@ class SerialController:
 
     def send_class_event(self, class_id: Optional[int]) -> bool:
         """
-        Traduce el ID de clase detectado a su byte correspondiente y lo transmite
-        unicamente si representa una transicion de estado frente al ultimo envio.
+        Traduce el ID de clase detectado a su byte de APARICION correspondiente
+        y lo transmite unicamente si representa una transicion de estado.
 
         :param class_id: ID numerico de la clase detectada (0 a 8) o None si reposo.
         :return: True si se transmitio un cambio de estado, False si se omitio por repeticion.
@@ -117,6 +132,33 @@ class SerialController:
             return False
 
         # Transmitir el nuevo estado
+        self._transmit_byte(target_byte)
+        self.last_sent_byte = target_byte
+        return True
+
+    def send_disappearance_event(self, class_id: Optional[int]) -> bool:
+        """
+        Envia el byte negativo correspondiente a class_id cuando el objeto
+        deja de ser detectado de forma estable (>= 7 de 10 frames sin deteccion).
+
+        Por ejemplo, si class_id=0 (cautin), envia b'-1'.
+        Solo transmite si representa una transicion de estado frente al ultimo envio.
+
+        :param class_id: ID numerico de la clase que desaparecio (0 a 8).
+        :return: True si se transmitio el evento, False si se omitio por repeticion o class_id invalido.
+        """
+        if class_id is None:
+            return False
+
+        target_byte = self.CLASS_BYTE_MAP_NEG.get(class_id)
+        if target_byte is None:
+            return False
+
+        # Filtro de transmision: ignorar si no hay cambio de estado
+        if target_byte == self.last_sent_byte:
+            return False
+
+        # Transmitir el evento de desaparicion
         self._transmit_byte(target_byte)
         self.last_sent_byte = target_byte
         return True

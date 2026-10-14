@@ -30,15 +30,15 @@ logger = logging.getLogger("DetectBridge")
 
 # Mapeo oficial de las 9 clases del inventario de laboratorio
 PROJECT_CLASSES = {
-    0: "cautin",
-    1: "multimetro_digital",
-    2: "multimetro_analogico",
-    3: "estacion_soldadura",
-    4: "caja_sensores",
-    5: "ventilador_pasco",
-    6: "bascula",
-    7: "capacitor_variable",
-    8: "fuente_voltaje"
+    0: "bascula",
+    1: "caja_sensores",
+    2: "capacitor_variable",
+    3: "cautin",
+    4: "estacion_soldadura",
+    5: "fuente_voltaje",
+    6: "multimetro_analogico",
+    7: "multimetro_digital",
+    8: "ventilador_pasco",
 }
 
 

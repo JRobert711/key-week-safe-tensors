@@ -61,7 +61,7 @@ except Exception:  # un fallo de voz nunca debe impedir la deteccion
     async def shutdown_voice(app):  # type: ignore[misc]
         return None
 
-CONF = float(os.getenv("CONF", "0.70"))
+CONF = float(os.getenv("CONF", "0.60"))
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(1_048_576)))
 JPEG_MAGIC = b"\xff\xd8\xff"
 # El frontend descarta mas de 50 cajas; se limita aqui para no enviar datos que se tiran.

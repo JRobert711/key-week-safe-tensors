@@ -10,6 +10,7 @@ import { VoiceTestButton } from "@/components/VoiceTestButton";
 import { useCamera } from "@/hooks/useCamera";
 import { useCapture } from "@/hooks/useCapture";
 import { useLiveDetection } from "@/hooks/useLiveDetection";
+import { useVoiceAnnouncer } from "@/hooks/useVoiceAnnouncer";
 
 const STORAGE_KEY = "toollighthouse:backend-url";
 
@@ -25,6 +26,9 @@ export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boo
   const effectiveBackendUrl = allowBackendUrl ? backendUrl : undefined;
   const capture = useCapture(camera.videoRef, effectiveBackendUrl);
   const live = useLiveDetection(camera.videoRef, camera.status === "active", effectiveBackendUrl);
+  // Fase 4: anuncia por voz cada transición estable de `official`. Flujo independiente: no toca el
+  // bucle de detección y sus errores no lo afectan. El estado (needsGesture, error) lo usará la Fase 5.
+  useVoiceAnnouncer({ official: live.official, model: live.model, phase: live.phase, running: live.running });
 
   // Recordar la última URL usada. El almacenamiento puede no estar disponible.
   useEffect(() => {

@@ -19,5 +19,8 @@ audio_out/
 npm-debug.log*
 .DS_Store
 
+#Ignorar .zip
+*.zip
+
 #Pruebas de FISH
 *.mp3

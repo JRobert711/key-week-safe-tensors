@@ -36,9 +36,17 @@ function readBackendUrl(required: boolean): string | null {
   return raw.replace(/\/+$/, "");
 }
 
-function readDetectPath(): string {
-  const raw = process.env.BACKEND_DETECT_PATH?.trim() || "/detect";
+function readPath(name: string, fallback: string): string {
+  const raw = process.env[name]?.trim() || fallback;
   return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function readDetectPath(): string {
+  return readPath("BACKEND_DETECT_PATH", "/detect");
+}
+
+function readVoiceAudioPath(): string {
+  return readPath("VOICE_AUDIO_PATH", "/voice/audio");
 }
 
 export function getServerConfig() {
@@ -51,5 +59,11 @@ export function getServerConfig() {
     detectPath: readDetectPath(),
     maxUploadBytes: readInt("MAX_UPLOAD_BYTES", 1_048_576),
     backendTimeoutMs: readInt("BACKEND_TIMEOUT_MS", 10_000),
+    /** Ruta interna de síntesis; nunca se expone al navegador. */
+    voiceAudioPath: readVoiceAudioPath(),
+    /** Clave opcional para autenticar el proxy ante FastAPI; solo servidor. */
+    voiceBackendKey: process.env.VOICE_BACKEND_KEY?.trim() || "",
+    voiceBackendTimeoutMs: readInt("VOICE_BACKEND_TIMEOUT_MS", 35_000),
+    maxVoiceAudioBytes: readInt("VOICE_MAX_AUDIO_BYTES", 500_000),
   };
 }

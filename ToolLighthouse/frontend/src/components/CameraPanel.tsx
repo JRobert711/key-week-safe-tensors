@@ -6,6 +6,7 @@ import { BackendUrlField } from "@/components/BackendUrlField";
 import { CameraView } from "@/components/CameraView";
 import { CaptureControls } from "@/components/CaptureControls";
 import { HudOverlay } from "@/components/HudOverlay";
+import { VoiceTestButton } from "@/components/VoiceTestButton";
 import { useCamera } from "@/hooks/useCamera";
 import { useCapture } from "@/hooks/useCapture";
 import { useLiveDetection } from "@/hooks/useLiveDetection";
@@ -73,6 +74,7 @@ export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boo
         showDetails={showDetails}
         onToggleDetails={() => setShowDetails((v) => !v)}
       />
+      <VoiceTestButton />
     </div>
   );
 }

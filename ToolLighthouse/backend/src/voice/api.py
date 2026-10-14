@@ -201,6 +201,7 @@ async def startup_voice(app: FastAPI) -> None:
                 cfg.max_queue_size,
                 cfg.max_concurrent_synthesis,
                 cfg.min_interval_seconds,
+                "Voz custom cargada" if cfg.reference_id else "ninguna",
                 "X-Backend-Key" if cfg.backend_key else "ninguna",
             )
             if not cfg.backend_key:

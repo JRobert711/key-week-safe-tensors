@@ -92,7 +92,7 @@ def resolve_model_weights(requested_path: Optional[str]) -> Tuple[str, bool]:
     2. Checkpoint optimizado runs/detect/train/weights/best.pt
     3. Copia en models/best.pt
     4. Fallback temporal: yolov8l.pt
-    
+
     :return: (ruta_pesos, es_fallback)
     """
     if requested_path:
@@ -138,13 +138,13 @@ def draw_hud(
     Dibuja una interfaz visual limpia (HUD) con telemetria en tiempo real:
     - Estado de deteccion oficial
     - Filtro de persistencia (X/10)
-    - Byte UART transmitido y estado del enlace
+    - Mensaje UART transmitido y estado del enlace
     - FPS de inferencia
     """
     overlay = frame.copy()
     h, w, _ = frame.shape
 
-    # Panel lateral superior semitransparente para estadisticas
+    # Panel superior semitransparente para estadisticas
     panel_w = 420
     panel_h = 160
     cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (20, 24, 30), -1)
@@ -238,6 +238,13 @@ def draw_hud(
     )
 
 
+def _last_byte_text(serial_ctrl: SerialController) -> str:
+    """Ultimo mensaje enviado al microcontrolador, como texto."""
+    if serial_ctrl.last_sent_byte:
+        return serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
+    return "Ninguno"
+
+
 def main() -> None:
     """Bucle principal de adquisicion, inferencia y control de hardware."""
     args = parse_arguments()
@@ -317,14 +324,13 @@ def main() -> None:
             if boxes is not None and len(boxes) > 0:
                 # Tomar la deteccion con mayor confianza
                 best_box = max(boxes, key=lambda b: float(b.conf[0]))
-                raw_cls_id = int(best_box.cls[0])
-                current_frame_class = raw_cls_id
+                current_frame_class = int(best_box.cls[0])
 
             # Actualizar historial temporal
             history_window.append(current_frame_class)
 
-            # Evaluar persistencia temporal (anti-parpadeo):
-            # Una clase es oficial unicamente si se repite >= 7 de los ultimos 10 frames
+            # Persistencia temporal (anti-parpadeo):
+            # una clase es oficial unicamente si aparece >= 7 de los ultimos 10 frames
             counts = Counter(history_window)
             official_class: Optional[int] = None
             stability_count = 0
@@ -335,39 +341,41 @@ def main() -> None:
                     stability_count = count
                     break
 
-            # Si no hay clase que cumpla el umbral de 7, estado oficial es reposo (None)
+            # Si ninguna clase cumple el umbral, el estado oficial es reposo (None)
             if official_class is None:
-                # Contar cuantas veces ha estado en reposo dentro de la ventana
                 stability_count = counts.get(None, 0)
 
-            # Despachar evento al microcontrolador (envia unicamente si el estado cambio)
+            # Despachar eventos al microcontrolador (solo cuando el estado cambia)
             if official_class is not None:
+                # Cambio directo A -> B: programar el apagado de A antes de encender B
+                if last_active_class is not None and last_active_class != official_class:
+                    if serial_ctrl.send_disappearance_event(last_active_class):
+                        prev_desc = PROJECT_CLASSES.get(last_active_class, f"Clase {last_active_class}")
+                        logger.info(
+                            f"[DESAPARICION ESTABLE] Herramienta: {prev_desc} -> Byte: '{_last_byte_text(serial_ctrl)}'"
+                        )
+                    last_active_class = None
+
                 # --- APARICION ESTABLE ---
-                state_changed = serial_ctrl.send_class_event(official_class)
-                if state_changed:
+                if serial_ctrl.send_appearance_event(official_class):
                     last_active_class = official_class
-                    target_byte = serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
                     cls_desc = PROJECT_CLASSES.get(official_class, f"Clase {official_class}")
-                    logger.info(f"[APARICION ESTABLE]  Herramienta: {cls_desc} -> Byte: '{target_byte}'")
+                    logger.info(
+                        f"[APARICION ESTABLE]  Herramienta: {cls_desc} -> Byte: '{_last_byte_text(serial_ctrl)}'"
+                    )
             else:
                 # --- DESAPARICION ESTABLE ---
-                # Si habia un objeto activo, enviar su byte negativo una sola vez
                 if last_active_class is not None:
-                    state_changed = serial_ctrl.send_disappearance_event(last_active_class)
-                    if state_changed:
-                        target_byte = serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
+                    if serial_ctrl.send_disappearance_event(last_active_class):
                         cls_desc = PROJECT_CLASSES.get(last_active_class, f"Clase {last_active_class}")
-                        logger.info(f"[DESAPARICION ESTABLE] Herramienta: {cls_desc} -> Byte: '{target_byte}'")
-                        last_active_class = None  # Limpiar para no re-enviar
+                        logger.info(
+                            f"[DESAPARICION ESTABLE] Herramienta: {cls_desc} -> Byte: '{_last_byte_text(serial_ctrl)}'"
+                        )
+                        last_active_class = None
 
-            # Generar frame visual con cajas delimitadoras dibujadas por YOLO
+            # Frame visual con cajas delimitadoras dibujadas por YOLO
             annotated_frame = results[0].plot()
 
-            # Representacion del byte actual
-            current_byte_char = (
-                serial_ctrl.last_sent_byte.decode("ascii", errors="replace")
-                if serial_ctrl.last_sent_byte else "Ninguno"
-            )
             serial_mode_label = "MOCK (Simulador)" if serial_ctrl.mock_mode else f"UART ({serial_ctrl.port})"
 
             # Renderizar interfaz de usuario (HUD)
@@ -378,7 +386,7 @@ def main() -> None:
                 stability_count=stability_count,
                 history_len=len(history_window),
                 serial_mode_str=serial_mode_label,
-                last_byte_str=current_byte_char,
+                last_byte_str=_last_byte_text(serial_ctrl),
                 is_fallback=is_fallback
             )
 

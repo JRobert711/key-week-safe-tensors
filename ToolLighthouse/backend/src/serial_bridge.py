@@ -1,93 +1,69 @@
 """
 ToolLighthouse - Serial Bridge Controller
-Gestiona la comunicacion UART con el microcontrolador (Arduino / ESP32) para
-el control de iluminacion LED por zonas en la maqueta 3D.
+Gestiona la comunicacion UART con el Arduino Nano para el control de
+iluminacion LED por zonas en la maqueta 3D.
+
+Protocolo (2 bytes ASCII por mensaje):
+  "+X" -> herramienta X aparece    (el LED X se enciende y se mantiene)
+  "-X" -> herramienta X desaparece (el Arduino apaga el LED X 15 s despues)
+  "0"  -> apaga todo de inmediato
+X = 1..9  (clase YOLO 0..8 + 1; LED 1 = D2 ... LED 9 = D10)
 """
 
 import time
 import logging
-from typing import Optional
+from typing import Optional, Set
 
-# Configuracion de logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("SerialController")
 
 
 class SerialController:
     """
-    Controlador de comunicacion serie UART para ToolLighthouse.
-    
-    Implementa:
-    - Autoconexion con retardo de seguridad DTR (2s).
-    - Tolerancia a fallos: fallback automatico a modo MOCK si no se detecta el hardware.
-    - Mapeo estricto de IDs de clases (0-8 -> b'1'-b'9') y reposo (b'0').
-    - Filtro de transmision para disparar eventos exclusivamente en cambios de estado.
+    Controlador UART con:
+    - Autoconexion con retardo de seguridad DTR (2 s).
+    - Fallback automatico a modo MOCK si no se detecta el hardware.
+    - Eventos de aparicion (+X) y desaparicion (-X) filtrados por cambio de estado.
     """
 
-    # Mapeo oficial de clases ToolLighthouse a bytes UART
-    CLASS_BYTE_MAP = {
-        None: b'0',  # Reposo / Sin deteccion
-        -1: b'0',    # Reposo alternativo
-        0: b'+1',     # cautin -> Zona 1
-        1: b'+2',     # multimetro_digital -> Zona 2
-        2: b'+3',     # multimetro_analogico -> Zona 3
-        3: b'+4',     # estacion_soldadura -> Zona 4
-        4: b'+5',     # caja_sensores -> Zona 5
-        5: b'+6',     # ventilador_pasco -> Zona 6
-        6: b'+7',     # bascula -> Zona 7
-        7: b'+8',     # capacitor_variable -> Zona 8
-        8: b'+9',     # fuente_voltaje -> Zona 9
-    }
+    NUM_ZONES = 9
 
     def __init__(
         self,
         port: str = "COM3",
         baudrate: int = 115200,
         timeout: float = 1.0,
-        force_mock: bool = False
+        force_mock: bool = False,
     ) -> None:
-        """
-        Inicializa el controlador.
-
-        :param port: Puerto serie (ej. 'COM3', '/dev/ttyUSB0').
-        :param baudrate: Velocidad en baudios (por defecto 115200).
-        :param timeout: Tiempo de espera en lectura/escritura (segundos).
-        :param force_mock: Si es True, fuerza el modo de simulacion sin intentar abrir puerto.
-        """
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self.mock_mode = force_mock
         self.serial_conn = None
-        self.last_sent_byte: Optional[bytes] = None
-
-        # Intentar conexion inicial
+        self.active_classes: Set[int] = set()       # clases actualmente encendidas
+        self.last_sent_byte: Optional[bytes] = None  # ultimo mensaje enviado (para el HUD/logs)
         self.connect()
 
+    # ------------------------------------------------------------------ conexion
     def connect(self) -> bool:
-        """
-        Establece la conexion UART o entra en MODO MOCK si el puerto no esta disponible.
-        
-        :return: True si esta conectado a hardware real, False si operando en MOCK.
-        """
+        """Abre el puerto serie o entra en MODO MOCK. True = hardware real."""
         if self.mock_mode:
             logger.info("[MODO MOCK FORZADO] Simulador serie activo.")
             return False
 
         try:
-            import serial  # Importacion tardia para evitar bloqueos si pyserial falta
+            import serial  # importacion tardia: no falla si pyserial falta hasta aqui
             logger.info(f"Intentando conexion serie en {self.port} a {self.baudrate} baudios...")
             self.serial_conn = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
-                timeout=self.timeout
+                timeout=self.timeout,
             )
-            # Pausa de seguridad indispensable para absorber reinicio por linea DTR en Arduino/ESP32
-            logger.info("Conexion establecida. Esperando 2.0s para estabilizar microcontrolador tras reinicio DTR...")
+            logger.info("Conexion establecida. Esperando 2.0s por reinicio DTR del microcontrolador...")
             time.sleep(2.0)
             logger.info(f"Comunicacion UART lista y sincronizada en {self.port}.")
             self.mock_mode = False
@@ -102,55 +78,74 @@ class SerialController:
             self.mock_mode = True
             return False
 
-    def send_class_event(self, class_id: Optional[int]) -> bool:
-        """
-        Traduce el ID de clase detectado a su byte correspondiente y lo transmite
-        unicamente si representa una transicion de estado frente al ultimo envio.
+    # ------------------------------------------------------------------ eventos
+    @classmethod
+    def _zone(cls, class_id: Optional[int]) -> Optional[int]:
+        """Clase YOLO 0..8 -> zona 1..9. None si el id no es valido."""
+        if class_id is None:
+            return None
+        cid = int(class_id)
+        if not (0 <= cid < cls.NUM_ZONES):
+            return None
+        return cid + 1
 
-        :param class_id: ID numerico de la clase detectada (0 a 8) o None si reposo.
-        :return: True si se transmitio un cambio de estado, False si se omitio por repeticion.
-        """
-        target_byte = self.CLASS_BYTE_MAP.get(class_id, b'0')
-
-        # Filtro de transmision: ignorar si no hay cambio de estado
-        if target_byte == self.last_sent_byte:
+    def send_appearance_event(self, class_id: Optional[int]) -> bool:
+        """Envia '+X'. Devuelve True solo si hubo cambio de estado."""
+        zone = self._zone(class_id)
+        if zone is None or class_id in self.active_classes:
             return False
-
-        # Transmitir el nuevo estado
-        self._transmit_byte(target_byte)
-        self.last_sent_byte = target_byte
+        self._transmit(f"+{zone}".encode("ascii"))
+        self.active_classes.add(class_id)
         return True
 
-    def _transmit_byte(self, byte_val: bytes) -> None:
-        """
-        Metodo interno de bajo nivel para despachar el byte al microcontrolador
-        o emitir la simulacion en terminal si se esta en MODO MOCK.
-        """
-        char_repr = byte_val.decode("ascii", errors="replace")
+    def send_disappearance_event(self, class_id: Optional[int]) -> bool:
+        """Envia '-X'. Devuelve True solo si hubo cambio de estado."""
+        zone = self._zone(class_id)
+        if zone is None or class_id not in self.active_classes:
+            return False
+        self._transmit(f"-{zone}".encode("ascii"))
+        self.active_classes.discard(class_id)
+        return True
+
+    def send_class_event(self, class_id: Optional[int]) -> bool:
+        """Compatibilidad: None/-1 -> desaparece lo activo; id -> aparece."""
+        if class_id is None or class_id == -1:
+            changed = False
+            for cid in list(self.active_classes):
+                changed |= self.send_disappearance_event(cid)
+            return changed
+        return self.send_appearance_event(class_id)
+
+    def reset_state(self) -> None:
+        """Apaga todos los LED de inmediato enviando '0'."""
+        self._transmit(b"0")
+        self.active_classes.clear()
+
+    # ------------------------------------------------------------------ bajo nivel
+    def _transmit(self, data: bytes) -> None:
+        """Despacha el mensaje al microcontrolador o lo simula en terminal."""
+        self.last_sent_byte = data
+        text = data.decode("ascii", errors="replace")
 
         if self.mock_mode or self.serial_conn is None:
-            print(f"[SERIAL MOCK] Enviando byte: {char_repr}")
+            print(f"[SERIAL MOCK] Enviando: {text}")
             return
 
         try:
-            self.serial_conn.write(byte_val)
+            self.serial_conn.write(data)
             self.serial_conn.flush()
-            logger.info(f"[SERIAL UART] Enviado byte: {char_repr} a {self.port}")
+            logger.info(f"[SERIAL UART] Enviado: {text} a {self.port}")
         except Exception as exc:
             logger.error(f"[ERROR UART] Fallo al escribir en {self.port}: {exc}. Conmutando a MODO MOCK.")
             self.mock_mode = True
-            print(f"[SERIAL MOCK] Enviando byte: {char_repr}")
-
-    def reset_state(self) -> None:
-        """Fuerza el envio de estado de reposo (b'0')."""
-        self.send_class_event(None)
+            print(f"[SERIAL MOCK] Enviando: {text}")
 
     def close(self) -> None:
-        """Cierra de forma limpia el canal de comunicacion."""
+        """Apaga los LED y cierra el canal de comunicacion."""
         if self.serial_conn is not None:
             try:
                 if self.serial_conn.is_open:
-                    self.send_class_event(None)  # Apagar LEDs antes de salir
+                    self.reset_state()
                     self.serial_conn.close()
                     logger.info(f"Puerto serie {self.port} cerrado correctamente.")
             except Exception as exc:
@@ -166,26 +161,15 @@ class SerialController:
 
 
 if __name__ == "__main__":
-    # Test independiente del serial bridge
-    print("=== Probando SerialController en modo de prueba ===")
-    controller = SerialController(port="COM3", baudrate=115200)
+    print("=== Probando SerialController ===")
+    controller = SerialController(port="COM3", baudrate=115200, force_mock=True)
 
-    print("\n--- Simulando transiciones de estado ---")
-    # Reposo inicial
-    controller.send_class_event(None)
-    
-    # Repetir reposo (debe ser ignorado por el filtro)
-    controller.send_class_event(None)
-
-    # Detectar cautin (Clase 0 -> byte '1')
-    controller.send_class_event(0)
-    controller.send_class_event(0)  # Ignorado por repeticion
-
-    # Detectar fuente de voltaje (Clase 8 -> byte '9')
-    controller.send_class_event(8)
-
-    # Regresar a reposo (byte '0')
-    controller.send_class_event(None)
+    controller.send_appearance_event(3)      # +4 (cautin)
+    controller.send_appearance_event(3)      # ignorado (sin cambio)
+    controller.send_appearance_event(8)      # +9 (ventilador_pasco)
+    controller.send_disappearance_event(3)   # -4
+    controller.send_disappearance_event(8)   # -9
+    controller.reset_state()                 # 0
 
     controller.close()
-    print("=== Prueba finalizada con exito ===")
+    print("=== Prueba finalizada ===")

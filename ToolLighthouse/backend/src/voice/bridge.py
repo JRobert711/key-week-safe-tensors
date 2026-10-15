@@ -102,6 +102,7 @@ class VoiceBridge:
         self._dedupe: "OrderedDict[str, Tuple[float, asyncio.Future]]" = OrderedDict()
         self._stats: Dict[str, Any] = {
             "requests": 0,
+            "low_confidence_requests": 0,
             "ok": 0,
             "cache_hits": 0,
             "deduplicated": 0,
@@ -178,7 +179,7 @@ class VoiceBridge:
     # ------------------------------------------------------------------ API publica
     async def synthesize_detection(
         self,
-        class_name: str,
+        class_names: List[str],
         *,
         event_id: str,
         session_id: str,
@@ -186,33 +187,74 @@ class VoiceBridge:
     ) -> AudioResult:
         self._stats["requests"] += 1
         self._ensure_available()
-        text = build_detection_message(class_name, self._cfg.language)  # InvalidEventError si no es clase
+        from .message_builder import normalize_class_names
+
+        normalized = normalize_class_names(class_names)
+        text = build_detection_message(normalized, self._cfg.language)
+        class_names_key = ",".join(normalized)
         now = self._clock()
         self._purge(now)
 
-        # 1) dedupe
-        keys = (f"e:{event_id}", f"t:{session_id}:{transition_id}:{class_name}")
+        # 1) Dedupe por evento o por sesión/transición/conjunto.
+        keys = (f"e:{event_id}", f"t:{session_id}:{transition_id}:{class_names_key}")
         existing = self._dedupe_get(keys, now)
         if existing is not None:
             self._stats["deduplicated"] += 1
             return await asyncio.shield(existing)
 
-        # 2) orden de transiciones
+        # 2) Orden de transiciones.
         session = self._session(session_id, now)
         if transition_id < session.last_transition:
             self._stats["stale"] += 1
             raise StaleEventError()
 
-        # 3) intervalo minimo por sesion
+        # 3) Intervalo mínimo por sesión.
         interval = self._cfg.min_interval_seconds
         if session.last_accept is not None and now - session.last_accept < interval:
             self._stats["throttled"] += 1
             raise RateLimitedError(retry_after=max(1, math.ceil(interval - (now - session.last_accept))))
 
-        # 4) cache / 5) cola
-        fut = self._admit(text, class_name, priority=0, session_id=session_id, transition_id=transition_id)
+        # 4) Caché / 5) cola. La clave de caché real se basa en el texto completo.
+        fut = self._admit(text, class_names_key, priority=0, session_id=session_id, transition_id=transition_id)
         session.last_transition = transition_id
         session.last_accept = now
+        self._dedupe_put(keys, fut, now)
+        return await asyncio.shield(fut)
+
+    async def synthesize_hint(
+        self,
+        resolve: Callable[[], Tuple[str, str]],
+        *,
+        event_id: str,
+        hint_id: str,
+    ) -> AudioResult:
+        """Voz de un aviso de baja confianza ("Creo haber visto ...").
+
+        `resolve()` devuelve (texto, clase) a partir del aviso registrado en el HintEngine (tabla
+        cerrada: el texto nunca viene del cliente) y puede lanzar VoiceError si el aviso no existe o
+        ya no esta vigente. Solo se invoca si la peticion NO es un duplicado, de modo que un reintento
+        del mismo event_id / hint_id reutiliza el audio aunque el aviso ya se haya cerrado.
+
+        Es rutinario (prioridad 0: se descarta antes que cualquier otro si la cola se llena) y NO usa
+        sesion ni transition_id, asi que no interfiere con el orden ni el intervalo de los anuncios de
+        deteccion. Las esperas anti-repeticion ya las aplica el HintEngine: no hay intervalo propio.
+        """
+        self._stats["requests"] += 1
+        self._stats["low_confidence_requests"] += 1
+        self._ensure_available()
+        now = self._clock()
+        self._purge(now)
+
+        keys = (f"e:{event_id}", f"h:{hint_id}")
+        existing = self._dedupe_get(keys, now)
+        if existing is not None:
+            self._stats["deduplicated"] += 1
+            return await asyncio.shield(existing)
+
+        text, class_name = resolve()
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_SPEAK_CHARS:
+            raise InvalidEventError(f"El texto debe tener entre 1 y {MAX_SPEAK_CHARS} caracteres.")
+        fut = self._admit(text.strip(), class_name, priority=0)
         self._dedupe_put(keys, fut, now)
         return await asyncio.shield(fut)
 

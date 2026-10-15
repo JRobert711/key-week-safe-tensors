@@ -2,8 +2,15 @@
 API de voz (router FastAPI) y funciones de ciclo de vida.
 
 Rutas (internas del backend; el navegador solo llama al proxy de Next.js):
-  POST /voice/audio    cuerpo JSON {event_id, session_id, class_name, transition_id}
-                       -> 200 audio/mpeg (binario, Cache-Control: no-store)
+  POST /voice/audio    -> 200 audio/mpeg (binario, Cache-Control: no-store). Dos tipos de cuerpo JSON:
+                       kind "detection" (por defecto):
+                         {event_id, session_id, class_names, transition_id}
+                       kind "low_confidence" (aviso "Creo haber visto ..."):
+                         {kind, event_id, hint_id}
+                         La frase NO viaja en la peticion: el backend la toma del aviso registrado en el
+                         HintEngine (tabla cerrada), asi lo que se habla es exactamente lo que muestra el banner.
+                         Solo se habla un aviso vigente: 404 unknown_hint si no existe o caduco, 409 stale_event
+                         si ya se cerro (confirmado, perdido o reemplazado), 503 hints_disabled si no hay avisos.
   GET  /voice/status   contadores y estado, sin secretos
 
 Autenticacion: si VOICE_BACKEND_KEY esta definida, se exige la cabecera X-Backend-Key
@@ -20,20 +27,24 @@ import asyncio
 import hmac
 import json
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError
 
 from .bridge import VoiceBridge
 from .config import VoiceConfig, VoiceConfigError
 from .message_builder import SUPPORTED_LANGUAGES
 from .provider import (
+    AudioResult,
     ForbiddenError,
+    HintsUnavailableError,
     InvalidEventError,
     PayloadTooLargeError,
+    StaleEventError,
     UnauthorizedError,
+    UnknownHintError,
     VoiceDisabledError,
     VoiceError,
 )
@@ -51,10 +62,21 @@ class VoiceEvent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    kind: Literal["detection"] = "detection"
     event_id: str = Field(pattern=ID_PATTERN)
     session_id: str = Field(pattern=ID_PATTERN)
-    class_name: str = Field(min_length=1, max_length=64)
+    class_names: list[StrictStr] = Field(min_length=1, max_length=9)
     transition_id: StrictInt = Field(ge=0, le=2_147_483_647)
+
+
+class LowConfidenceEvent(BaseModel):
+    """Solo identifica el aviso: ni clase ni texto vienen del cliente."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["low_confidence"]
+    event_id: str = Field(pattern=ID_PATTERN)
+    hint_id: str = Field(pattern=ID_PATTERN)
 
 
 # ---------------------------------------------------------------------- utilidades
@@ -101,6 +123,23 @@ async def _read_json_body(request: Request) -> object:
         raise InvalidEventError("El cuerpo no es JSON valido.") from None
 
 
+async def _synthesize_low_confidence(request: Request, bridge: VoiceBridge, event: LowConfidenceEvent) -> AudioResult:
+    engine = getattr(request.app.state, "hint_engine", None)
+    if engine is None:
+        raise HintsUnavailableError()
+
+    def resolve() -> tuple[str, str]:
+        hint = engine.get(event.hint_id)
+        if hint is None:
+            raise UnknownHintError()
+        active = engine.active_hint()
+        if active is None or active.hint_id != hint.hint_id:
+            raise StaleEventError()  # ya confirmado, perdido o reemplazado: no tiene sentido hablarlo
+        return hint.message, hint.class_name
+
+    return await bridge.synthesize_hint(resolve, event_id=event.event_id, hint_id=event.hint_id)
+
+
 # ---------------------------------------------------------------------- rutas
 @router.post("/audio")
 async def voice_audio(request: Request) -> Response:
@@ -111,36 +150,43 @@ async def voice_audio(request: Request) -> Response:
         _check_key(request, bridge)
         payload = await _read_json_body(request)
         try:
-            event = VoiceEvent.model_validate(payload)
+            if isinstance(payload, dict) and payload.get("kind") == "low_confidence":
+                event = LowConfidenceEvent.model_validate(payload)
+            else:
+                event = VoiceEvent.model_validate(payload)
         except ValidationError:
             # No se devuelve el detalle de pydantic (podria reflejar la entrada del cliente).
             raise InvalidEventError(
-                "Se esperan event_id, session_id (8-64 caracteres [A-Za-z0-9_-]), "
-                "class_name (clase permitida) y transition_id (entero >= 0)."
+                "Se esperan event_id, session_id, class_names (lista de clases permitidas) y "
+                "transition_id (entero >= 0), o bien kind='low_confidence' con event_id y hint_id."
             ) from None
-        result = await bridge.synthesize_detection(
-            event.class_name,
-            event_id=event.event_id,
-            session_id=event.session_id,
-            transition_id=event.transition_id,
-        )
+        if isinstance(event, LowConfidenceEvent):
+            result = await _synthesize_low_confidence(request, bridge, event)
+        else:
+            result = await bridge.synthesize_detection(
+                event.class_names,
+                event_id=event.event_id,
+                session_id=event.session_id,
+                transition_id=event.transition_id,
+            )
     except VoiceError as exc:
         return _error_response(exc)
     except Exception:
         logger.exception("Error inesperado en /voice/audio")
         return _error_response(VoiceError())
 
-    return Response(
-        content=result.audio,
-        media_type=result.mime,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "X-Voice-Event-Id": event.event_id,
-            "X-Voice-Transition-Id": str(event.transition_id),
-            "X-Voice-Cache": "hit" if result.cached else "miss",
-        },
-    )
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "X-Voice-Kind": event.kind,
+        "X-Voice-Event-Id": event.event_id,
+        "X-Voice-Cache": "hit" if result.cached else "miss",
+    }
+    if isinstance(event, LowConfidenceEvent):
+        headers["X-Voice-Hint-Id"] = event.hint_id
+    else:
+        headers["X-Voice-Transition-Id"] = str(event.transition_id)
+    return Response(content=result.audio, media_type=result.mime, headers=headers)
 
 
 @router.get("/status")
@@ -201,7 +247,6 @@ async def startup_voice(app: FastAPI) -> None:
                 cfg.max_queue_size,
                 cfg.max_concurrent_synthesis,
                 cfg.min_interval_seconds,
-                "Voz custom cargada" if cfg.reference_id else "ninguna",
                 "X-Backend-Key" if cfg.backend_key else "ninguna",
             )
             if not cfg.backend_key:

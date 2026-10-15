@@ -59,6 +59,14 @@ class ForbiddenError(VoiceError):
     status_code, code, public_message = 403, "forbidden", "Credencial no valida."
 
 
+class UnknownHintError(VoiceError):
+    status_code, code, public_message = 404, "unknown_hint", "El aviso no existe o ya caduco."
+
+
+class HintsUnavailableError(VoiceError):
+    status_code, code, public_message = 503, "hints_disabled", "Los avisos estan deshabilitados."
+
+
 class StaleEventError(VoiceError):
     status_code, code, public_message = 409, "stale_event", "El evento fue reemplazado por uno mas reciente."
 

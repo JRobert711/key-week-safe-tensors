@@ -1,6 +1,8 @@
 import { VOICE_CLASSES, type VoiceClassName } from "@/lib/voiceContract";
 import type { ModelKind } from "@/types/detection";
 
+export type { VoiceClassName };
+
 export const VOICE_COOLDOWN_MS = 8_000;
 
 export interface TransitionState {

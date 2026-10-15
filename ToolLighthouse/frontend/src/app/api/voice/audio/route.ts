@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { isAudioContentType, parseVoiceEvent } from "@/lib/voiceContract";
+import { isAudioContentType, parseVoiceRequest } from "@/lib/voiceContract";
 import { getServerConfig } from "@/lib/server-config";
 
 export const runtime = "nodejs";
@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 const MAX_REQUEST_BYTES = 2048;
 const MAX_RETRY_AFTER_SECONDS = 300;
-const AUDIO_HEADERS = ["x-voice-event-id", "x-voice-transition-id", "x-voice-cache"] as const;
+const AUDIO_HEADERS = ["x-voice-event-id", "x-voice-transition-id", "x-voice-hint-id", "x-voice-kind", "x-voice-cache"] as const;
 
 function fail(status: number, error: string, message: string, extraHeaders?: Record<string, string>) {
   const headers = new Headers({ "Cache-Control": "no-store" });
@@ -78,9 +78,10 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Ar
 
 function mapUpstreamStatus(status: number, code: string | null): number {
   if (status === 409 && code === "stale_event") return 409;
+  if (status === 404 && code === "unknown_hint") return 404;
   if (status === 413) return 413;
   if (status === 429) return 429;
-  if (status === 503 && code === "voice_disabled") return 503;
+  if (status === 503 && (code === "voice_disabled" || code === "hints_disabled")) return 503;
   if (status === 504 && code === "provider_timeout") return 504;
   if (status === 400 && code === "invalid_request") return 400;
   return 502;
@@ -89,6 +90,7 @@ function mapUpstreamStatus(status: number, code: string | null): number {
 function publicMessage(status: number): string {
   switch (status) {
     case 400: return "La solicitud de voz no es válida.";
+    case 404: return "El aviso ya no está disponible.";
     case 409: return "La solicitud de voz quedó obsoleta.";
     case 413: return "La solicitud de voz es demasiado grande.";
     case 429: return "La voz está ocupada. Espera un momento y vuelve a intentarlo.";
@@ -132,7 +134,7 @@ export async function POST(request: Request) {
   } catch {
     return fail(400, "invalid-body", "La solicitud de voz no contiene JSON válido.");
   }
-  const event = parseVoiceEvent(parsed);
+  const event = parseVoiceRequest(parsed);
   if (!event) return fail(400, "invalid-event", "La solicitud de voz no cumple el contrato esperado.");
   if (!config.backendUrl) return fail(500, "server-config", "El servidor no está configurado correctamente.");
 
@@ -153,12 +155,7 @@ export async function POST(request: Request) {
   } catch (error) {
     if (request.signal.aborted) return fail(499, "aborted", "La solicitud de voz se canceló.");
     if (signal.aborted) return fail(504, "upstream-timeout", "El servicio de voz tardó demasiado en responder.");
-    console.error("[voice-proxy] conexión ascendente fallida:", {
-      url: `${config.backendUrl}${config.voiceAudioPath}`,
-      name: error instanceof Error ? error.name : "desconocido",
-      message: error instanceof Error ? error.message : String(error),
-      cause: error instanceof Error ? error.cause : undefined,
-    });
+    console.error("[voice-proxy] conexión ascendente fallida:", error instanceof Error ? error.name : "desconocido");
     return fail(502, "upstream-unreachable", "No se pudo conectar con el servicio de voz.");
   }
 

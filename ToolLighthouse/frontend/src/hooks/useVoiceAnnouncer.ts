@@ -9,26 +9,11 @@ import {
   type TransitionState,
   type VoiceClassName,
 } from "@/lib/voiceTransition";
-import type { ModelKind } from "@/types/detection";
-import type { VoiceEvent, VoicePlaybackStatus } from "@/types/voice";
-
-/**
- * Anuncios automáticos por transición estable (Fase 4). Se alimenta con lo que ya expone
- * useLiveDetection (official, model, phase, running) y NO modifica el bucle de detección:
- * la síntesis corre en un flujo independiente y sus errores nunca llegan a la detección.
- *
- *  - Una petición por TRANSICIÓN (nunca por fotograma, nunca para una clase persistente).
- *  - Una sola solicitud en curso: una transición nueva cancela la anterior (gana la más reciente).
- *  - Si una frase ya suena, se deja terminar; solo se guarda UN audio pendiente (el más reciente).
- *  - Audio que tarda más de STALE_AFTER_MS en llegar se descarta (ya no describe lo que se ve).
- *  - Al terminar la sesión en vivo (cámara/modo en vivo detenidos) se cancela todo y se reinicia
- *    session_id y transition_id; las respuestas de la sesión vieja se ignoran.
- *  - Cada URL temporal se revoca en ended/error/cancelación/desmontaje.
- */
+import type { DetectionBox, ModelKind } from "@/types/detection";
+import type { LowConfidenceVoiceEvent, VoiceEvent, VoicePlaybackStatus } from "@/types/voice";
 
 /** Un audio que llega más tarde que esto ya no corresponde a la transición que lo pidió. */
 export const STALE_AFTER_MS = 8_000;
-/** Espera por defecto antes de reintentar tras un 429 (el backend limita 1 síntesis nueva / 3 s por sesión). */
 const RETRY_AFTER_DEFAULT_MS = 3_200;
 const MAX_TRANSITION_ID = 2_147_483_647;
 
@@ -40,30 +25,37 @@ function makeId(): string {
 }
 
 export interface VoiceAnnouncerInput {
-  /** `live.official`: clase oficial ya filtrada por estabilidad. */
-  official: string | null;
-  /** `live.model`: "fallback" nunca se anuncia. */
+  /** Cajas de detección del fotograma actual; el anuncio usa el conjunto de clases únicas. */
+  boxes: DetectionBox[] | null;
+  /** El modelo fallback nunca se anuncia. */
   model: ModelKind | null;
-  /** `live.phase`: solo se evalúan transiciones con la fase "running". */
   phase: LivePhase;
-  /** `live.running`: al pasar a false termina la sesión de voz. */
   running: boolean;
-  /** Apaga los anuncios sin tocar la detección (Fase 5 conectará aquí el interruptor). */
   enabled?: boolean;
+  /**
+   * Aviso "Creo haber visto X" visible ahora (solo su id). Se habla una vez por aviso, respetando `enabled`.
+   * Si ya suena o se está pidiendo otro audio, el aviso queda solo en texto (el banner siempre lo muestra).
+   */
+  hintId?: string | null;
 }
+
+type AudioKind = "detection" | "hint";
 
 export interface VoiceAnnouncerState {
   status: VoicePlaybackStatus;
   error: string | null;
-  /** El navegador bloqueó el autoplay: llamar retryPlayback() desde un clic del usuario. */
   needsGesture: boolean;
-  /** Última clase anunciada (informativo). */
-  lastAnnounced: VoiceClassName | null;
+  /** Clases del último conjunto anunciado. */
+  lastAnnounced: VoiceClassName[] | null;
 }
 
-const INITIAL: VoiceAnnouncerState = { status: "idle", error: null, needsGesture: false, lastAnnounced: null };
+const INITIAL: VoiceAnnouncerState = {
+  status: "idle",
+  error: null,
+  needsGesture: false,
+  lastAnnounced: null,
+};
 
-/** Espera `ms` o hasta que se cancele; devuelve false si se canceló. */
 function wait(ms: number, signal: AbortSignal): Promise<boolean> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve(false);
@@ -78,20 +70,23 @@ function wait(ms: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
-export function useVoiceAnnouncer({ official, model, phase, running, enabled = true }: VoiceAnnouncerInput) {
+export function useVoiceAnnouncer({ boxes, model, phase, running, enabled = true, hintId = null }: VoiceAnnouncerInput) {
   const [snapshot, setSnapshot] = useState<VoiceAnnouncerState>(INITIAL);
-
   const transitionRef = useRef<TransitionState>(INITIAL_TRANSITION_STATE);
   const sessionIdRef = useRef<string | null>(null);
   const transitionIdRef = useRef(0);
-  const seqRef = useRef(0); // invalida respuestas de solicitudes anteriores y de sesiones terminadas
+  const seqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
-  const pendingRef = useRef<Blob | null>(null); // listo, esperando a que termine la frase actual
-  const blockedRef = useRef<Blob | null>(null); // bloqueado por la política de autoplay
+  const pendingRef = useRef<Blob | null>(null);
+  const blockedRef = useRef<Blob | null>(null);
   const mountedRef = useRef(true);
   const enabledRef = useRef(enabled);
+  /** Tipo de la petición en curso y del audio que suena: permiten cortar solo la voz de un aviso. */
+  const requestKindRef = useRef<AudioKind | null>(null);
+  const audioKindRef = useRef<AudioKind | null>(null);
+  const spokenHintRef = useRef<string | null>(null);
 
   const releaseAudio = useCallback(() => {
     const audio = audioRef.current;
@@ -102,150 +97,233 @@ export function useVoiceAnnouncer({ official, model, phase, running, enabled = t
       audio.removeAttribute("src");
       audioRef.current = null;
     }
+    audioKindRef.current = null;
     if (urlRef.current) {
       URL.revokeObjectURL(urlRef.current);
       urlRef.current = null;
     }
   }, []);
 
-  const playBlob = useCallback(
-    async (blob: Blob) => {
+  const playBlob = useCallback(async (blob: Blob, kind: AudioKind = "detection") => {
+    if (!enabledRef.current || !mountedRef.current) return;
+    releaseAudio();
+    audioKindRef.current = kind;
+    const url = URL.createObjectURL(blob);
+    urlRef.current = url;
+    const audio = new Audio(url);
+    audioRef.current = audio;
+
+    audio.onended = () => {
+      if (audioRef.current !== audio) return;
       releaseAudio();
-      const url = URL.createObjectURL(blob);
-      urlRef.current = url;
-      const audio = new Audio(url);
-      audioRef.current = audio;
-
-      audio.onended = () => {
-        if (audioRef.current !== audio) return;
-        releaseAudio();
-        const next = pendingRef.current;
-        pendingRef.current = null;
-        if (next) {
-          void playBlob(next);
-        } else if (mountedRef.current) {
-          setSnapshot((prev) => ({ ...prev, status: abortRef.current ? "loading" : "idle" }));
-        }
-      };
-      audio.onerror = () => {
-        if (audioRef.current !== audio) return;
-        releaseAudio();
-        if (mountedRef.current) {
-          setSnapshot((prev) => ({ ...prev, status: "error", error: "El navegador no pudo reproducir el audio." }));
-        }
-      };
-
-      try {
-        await audio.play();
-        if (audioRef.current === audio && mountedRef.current) {
-          setSnapshot((prev) => ({ ...prev, status: "playing", error: null, needsGesture: false }));
-        }
-      } catch (e) {
-        if (audioRef.current !== audio) return; // se canceló mientras arrancaba: no es un error
-        releaseAudio();
-        if (!mountedRef.current) return;
-        if (e instanceof DOMException && e.name === "NotAllowedError") {
-          blockedRef.current = blob;
-          setSnapshot((prev) => ({ ...prev, status: "idle", error: null, needsGesture: true }));
-        } else {
-          setSnapshot((prev) => ({ ...prev, status: "error", error: "No se pudo iniciar la reproducción de voz." }));
-        }
+      const next = pendingRef.current;
+      pendingRef.current = null;
+      if (next && enabledRef.current) {
+        void playBlob(next);
+      } else if (mountedRef.current) {
+        setSnapshot((prev) => ({ ...prev, status: abortRef.current ? "loading" : "idle" }));
       }
-    },
-    [releaseAudio],
-  );
+    };
 
-  /** Cancela solicitudes, descarta audios pendientes y detiene la reproducción. */
+    audio.onerror = () => {
+      if (audioRef.current !== audio) return;
+      releaseAudio();
+      pendingRef.current = null;
+      if (mountedRef.current) setSnapshot((prev) => ({ ...prev, status: "error", error: "El navegador no pudo reproducir el audio." }));
+    };
+
+    try {
+      await audio.play();
+      if (audioRef.current === audio && mountedRef.current && enabledRef.current) {
+        setSnapshot((prev) => ({ ...prev, status: "playing", error: null, needsGesture: false }));
+      }
+    } catch (e) {
+      if (audioRef.current !== audio) return;
+      releaseAudio();
+      if (!mountedRef.current || !enabledRef.current) return;
+      if (kind === "hint") {
+        // Un aviso es efímero: si el navegador bloquea el audio no se reintenta más tarde (el banner ya lo muestra).
+        setSnapshot((prev) => ({ ...prev, status: "idle", error: null }));
+      } else if (e instanceof DOMException && e.name === "NotAllowedError") {
+        blockedRef.current = blob;
+        setSnapshot((prev) => ({ ...prev, status: "idle", error: null, needsGesture: true }));
+      } else {
+        setSnapshot((prev) => ({ ...prev, status: "error", error: "No se pudo iniciar la reproducción de voz." }));
+      }
+    }
+  }, [releaseAudio]);
+
   const cancelAll = useCallback(() => {
     seqRef.current += 1;
     abortRef.current?.abort();
     abortRef.current = null;
+    requestKindRef.current = null;
     pendingRef.current = null;
     blockedRef.current = null;
     releaseAudio();
   }, [releaseAudio]);
 
-  /** Fin de la sesión en vivo: nada de lo pendiente sobrevive y los ids se reinician. */
   const endSession = useCallback(() => {
     cancelAll();
     transitionRef.current = INITIAL_TRANSITION_STATE;
     sessionIdRef.current = null;
     transitionIdRef.current = 0;
+    spokenHintRef.current = null;
     if (mountedRef.current) setSnapshot(INITIAL);
   }, [cancelAll]);
 
-  const announce = useCallback(
-    async (className: VoiceClassName) => {
-      const seq = ++seqRef.current;
-      abortRef.current?.abort(); // la solicitud anterior, si aún no sonó, queda obsoleta
-      const controller = new AbortController();
-      abortRef.current = controller;
+  const announce = useCallback(async (classNames: VoiceClassName[]) => {
+    if (!enabledRef.current || !mountedRef.current || classNames.length === 0) return;
+    const seq = ++seqRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    requestKindRef.current = "detection";
+    if (!sessionIdRef.current) sessionIdRef.current = makeId();
 
-      if (!sessionIdRef.current) sessionIdRef.current = makeId();
-      const event: VoiceEvent = {
-        event_id: makeId(),
-        session_id: sessionIdRef.current,
-        class_name: className,
-        transition_id: transitionIdRef.current,
-      };
-      transitionIdRef.current = (transitionIdRef.current + 1) % MAX_TRANSITION_ID;
-      const startedAt = Date.now();
-      setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "loading", error: null, lastAnnounced: className }));
+    const event: VoiceEvent = {
+      event_id: makeId(),
+      session_id: sessionIdRef.current,
+      class_names: classNames,
+      transition_id: transitionIdRef.current,
+    };
+    transitionIdRef.current = transitionIdRef.current >= MAX_TRANSITION_ID ? 0 : transitionIdRef.current + 1;
+    const startedAt = Date.now();
+    setSnapshot((prev) => ({
+      ...prev,
+      status: audioRef.current ? prev.status : "loading",
+      error: null,
+      lastAnnounced: classNames,
+    }));
 
-      try {
-        let blob: Blob | null = null;
-        for (let attempt = 0; attempt < 2 && blob === null; attempt++) {
-          try {
-            blob = await requestVoiceAudio(event, { signal: controller.signal });
-          } catch (e) {
-            // 429: el backend limita las síntesis nuevas por sesión. Un único reintento, si sigue vigente.
-            const retriable = e instanceof VoiceError && e.status === 429 && attempt === 0;
-            if (!retriable) throw e;
-            const delay = (e.retryAfterSeconds ?? 0) * 1000 || RETRY_AFTER_DEFAULT_MS;
-            if (!(await wait(delay, controller.signal))) return;
-            if (seq !== seqRef.current) return;
-          }
+    try {
+      let blob: Blob | null = null;
+      for (let attempt = 0; attempt < 2 && blob === null; attempt++) {
+        try {
+          blob = await requestVoiceAudio(event, { signal: controller.signal });
+        } catch (e) {
+          const retriable = e instanceof VoiceError && e.status === 429 && attempt === 0;
+          if (!retriable) throw e;
+          const delay = (e.retryAfterSeconds ?? 0) * 1000 || RETRY_AFTER_DEFAULT_MS;
+          if (!(await wait(delay, controller.signal))) return;
+          if (seq !== seqRef.current || !enabledRef.current) return;
         }
-        if (blob === null || seq !== seqRef.current || !mountedRef.current) return; // obsoleta o sesión terminada
-        if (Date.now() - startedAt > STALE_AFTER_MS) {
-          setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "idle" }));
-          return; // llegó tarde: ya no describe lo que se ve
-        }
-        if (audioRef.current) pendingRef.current = blob; // deja terminar la frase actual
-        else await playBlob(blob);
-      } catch (e) {
-        if (seq !== seqRef.current) return;
-        if (e instanceof VoiceError && e.code === "aborted") return;
-        if (!mountedRef.current) return;
-        const message = e instanceof VoiceError ? e.userMessage : "No se pudo generar el anuncio de voz.";
-        setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "error", error: message }));
-      } finally {
-        if (abortRef.current === controller) abortRef.current = null;
       }
-    },
-    [playBlob],
-  );
+      if (blob === null || seq !== seqRef.current || !mountedRef.current || !enabledRef.current) return;
+      if (Date.now() - startedAt > STALE_AFTER_MS) {
+        setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "idle" }));
+        return;
+      }
+      if (audioRef.current) pendingRef.current = blob;
+      else await playBlob(blob);
+    } catch (e) {
+      if (seq !== seqRef.current) return;
+      if (e instanceof VoiceError && e.code === "aborted") return;
+      if (!mountedRef.current || !enabledRef.current) return;
+      const message = e instanceof VoiceError ? e.userMessage : "No se pudo generar el anuncio de voz.";
+      setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "error", error: message }));
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        requestKindRef.current = null;
+      }
+    }
+  }, [playBlob]);
+
+  /** Habla un aviso de baja confianza. Nunca interrumpe ni reemplaza otro audio o petición en curso. */
+  const announceHint = useCallback(async (id: string) => {
+    if (!enabledRef.current || !mountedRef.current) return;
+    if (abortRef.current || audioRef.current) return; // ocupado: el aviso queda solo en texto
+    const seq = ++seqRef.current;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    requestKindRef.current = "hint";
+
+    const event: LowConfidenceVoiceEvent = { kind: "low_confidence", event_id: makeId(), hint_id: id };
+    const startedAt = Date.now();
+    setSnapshot((prev) => ({ ...prev, status: "loading", error: null }));
+
+    try {
+      const blob = await requestVoiceAudio(event, { signal: controller.signal });
+      if (seq !== seqRef.current || !mountedRef.current || !enabledRef.current) return;
+      if (Date.now() - startedAt > STALE_AFTER_MS || audioRef.current) {
+        setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "idle" }));
+        return;
+      }
+      await playBlob(blob, "hint");
+    } catch (e) {
+      if (seq !== seqRef.current) return;
+      if (!mountedRef.current || !enabledRef.current) return;
+      if (e instanceof VoiceError && e.code === "aborted") return;
+      // 404/409/429: el aviso ya caducó, se cerró o la voz está ocupada. No es un error para la persona.
+      const quiet = e instanceof VoiceError && (e.status === 404 || e.status === 409 || e.status === 429);
+      const message = e instanceof VoiceError ? e.userMessage : "No se pudo generar el anuncio de voz.";
+      setSnapshot((prev) => ({
+        ...prev,
+        status: audioRef.current ? prev.status : quiet ? "idle" : "error",
+        error: quiet ? null : message,
+      }));
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        requestKindRef.current = null;
+      }
+    }
+  }, [playBlob]);
+
+  /** Corta solo la voz de un aviso (petición o audio); la de detecciones no se toca. */
+  const cancelHint = useCallback(() => {
+    if (requestKindRef.current === "hint") {
+      seqRef.current += 1;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      requestKindRef.current = null;
+      if (mountedRef.current) setSnapshot((prev) => ({ ...prev, status: audioRef.current ? prev.status : "idle" }));
+    }
+    if (audioKindRef.current === "hint") {
+      releaseAudio();
+      const next = pendingRef.current;
+      pendingRef.current = null;
+      if (next && enabledRef.current) void playBlob(next);
+      else if (mountedRef.current) setSnapshot((prev) => ({ ...prev, status: "idle" }));
+    }
+  }, [playBlob, releaseAudio]);
 
   useEffect(() => {
     enabledRef.current = enabled;
-  }, [enabled]);
+    if (!enabled) {
+      cancelAll();
+      setSnapshot((prev) => ({ ...prev, status: "idle", error: null, needsGesture: false }));
+    }
+  }, [enabled, cancelAll]);
 
-  // Sesión terminada (cámara o modo en vivo detenidos): cancelar y reiniciar.
   useEffect(() => {
     if (!running) endSession();
   }, [running, endSession]);
 
-  // Detección de transiciones. Se ejecuta por cambio de official/model/phase, no por fotograma.
   useEffect(() => {
-    if (!running || !enabled || phase !== "running") return;
+    if (!running || phase !== "running") return;
     try {
-      const result = nextTransition(transitionRef.current, { official, model, now: Date.now() });
+      const classes = (boxes ?? []).map((box) => box.class);
+      const result = nextTransition(transitionRef.current, { classNames: classes, model, now: Date.now() });
       transitionRef.current = result.state;
-      if (result.announce) void announce(result.announce);
+      if (enabled && result.announce) void announce(result.announce);
     } catch {
-      /* un fallo de voz jamás debe afectar a la detección */
+      // Un fallo de voz jamás debe afectar a la detección.
     }
-  }, [official, model, phase, running, enabled, announce]);
+  }, [boxes, model, phase, running, enabled, announce]);
+
+  useEffect(() => {
+    if (!hintId) {
+      // El aviso se fue: si su audio aún se está pidiendo, se cancela; el que ya suena termina la frase.
+      if (requestKindRef.current === "hint") cancelHint();
+      return;
+    }
+    if (!enabled || !running || phase !== "running" || model === "fallback") return;
+    if (spokenHintRef.current === hintId) return;
+    spokenHintRef.current = hintId;
+    void announceHint(hintId);
+  }, [hintId, enabled, running, phase, model, announceHint, cancelHint]);
 
   const retryPlayback = useCallback(() => {
     const blob = blockedRef.current;
@@ -253,7 +331,6 @@ export function useVoiceAnnouncer({ official, model, phase, running, enabled = t
     if (blob && enabledRef.current) void playBlob(blob);
   }, [playBlob]);
 
-  // Al desmontar: cancelar solicitudes, detener el audio y revocar la URL temporal.
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -262,5 +339,5 @@ export function useVoiceAnnouncer({ official, model, phase, running, enabled = t
     };
   }, [cancelAll]);
 
-  return { ...snapshot, retryPlayback, cancel: endSession };
+  return { ...snapshot, retryPlayback, cancel: endSession, cancelHint };
 }

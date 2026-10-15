@@ -1,5 +1,5 @@
-import { isAudioContentType, parseVoiceEvent } from "@/lib/voiceContract";
-import type { VoiceEvent } from "@/types/voice";
+import { isAudioContentType, parseVoiceRequest } from "@/lib/voiceContract";
+import type { VoiceRequest } from "@/types/voice";
 
 export type VoiceErrorCode =
   | "invalid-event"
@@ -32,6 +32,7 @@ export interface VoiceRequestOptions {
 function httpMessage(status: number): string {
   switch (status) {
     case 400: return "La solicitud de voz no es válida.";
+    case 404: return "El aviso ya no está disponible.";
     case 409: return "La solicitud de voz quedó obsoleta. Vuelve a probar.";
     case 413: return "La solicitud de voz es demasiado grande.";
     case 429: return "La voz está ocupada. Espera un momento y vuelve a intentarlo.";
@@ -44,10 +45,10 @@ function httpMessage(status: number): string {
 
 /** Solicita audio al proxy same-origin; la URL y la clave del backend no llegan al navegador. */
 export async function requestVoiceAudio(
-  event: VoiceEvent,
+  event: VoiceRequest,
   { endpoint = "/api/voice/audio", timeoutMs = 45_000, signal }: VoiceRequestOptions = {},
 ): Promise<Blob> {
-  if (!parseVoiceEvent(event)) throw new VoiceError("invalid-event", "La solicitud de voz no es válida.");
+  if (!parseVoiceRequest(event)) throw new VoiceError("invalid-event", "La solicitud de voz no es válida.");
   if (signal?.aborted) throw new VoiceError("aborted", "La solicitud de voz se canceló.");
 
   const controller = new AbortController();

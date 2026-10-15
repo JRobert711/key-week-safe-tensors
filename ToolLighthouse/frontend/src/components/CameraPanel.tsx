@@ -5,32 +5,48 @@ import { BoxesLayer } from "@/components/BoxesLayer";
 import { BackendUrlField } from "@/components/BackendUrlField";
 import { CameraView } from "@/components/CameraView";
 import { CaptureControls } from "@/components/CaptureControls";
+import { HintBanner } from "@/components/HintBanner";
 import { HudOverlay } from "@/components/HudOverlay";
+import { VoiceControls } from "@/components/VoiceControls";
 import { VoiceTestButton } from "@/components/VoiceTestButton";
 import { useCamera } from "@/hooks/useCamera";
 import { useCapture } from "@/hooks/useCapture";
+import { useHints } from "@/hooks/useHints";
 import { useLiveDetection } from "@/hooks/useLiveDetection";
 import { useVoiceAnnouncer } from "@/hooks/useVoiceAnnouncer";
 
 const STORAGE_KEY = "toollighthouse:backend-url";
 
-/**
- * Punto de unión del lado cliente: la cámara y la captura comparten el mismo videoRef.
- * `allowBackendUrl` lo decide el servidor (ALLOW_CLIENT_BACKEND_URL).
- */
+/** Punto de unión del lado cliente: cámara, detección en vivo y voz automática. */
 export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boolean }) {
   const camera = useCamera();
   const [backendUrl, setBackendUrl] = useState("");
-  // Fase 3: cajas sobre el video y modelo en el HUD.
   const [showDetails, setShowDetails] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const effectiveBackendUrl = allowBackendUrl ? backendUrl : undefined;
   const capture = useCapture(camera.videoRef, effectiveBackendUrl);
   const live = useLiveDetection(camera.videoRef, camera.status === "active", effectiveBackendUrl);
-  // Fase 4: anuncia por voz cada transición estable de `official`. Flujo independiente: no toca el
-  // bucle de detección y sus errores no lo afectan. El estado (needsGesture, error) lo usará la Fase 5.
-  useVoiceAnnouncer({ official: live.official, model: live.model, phase: live.phase, running: live.running });
+  // Los avisos solo existen mientras el modo en vivo envía fotogramas; la conexión sigue ese mismo ciclo.
+  const hints = useHints({ enabled: live.running });
+  const voice = useVoiceAnnouncer({
+    boxes: live.boxes,
+    model: live.model,
+    phase: live.phase,
+    running: live.running,
+    enabled: voiceEnabled,
+    hintId: hints.hint?.hint_id ?? null,
+  });
+  // Cerrar o reportar un aviso también corta su voz (la de detecciones no se toca).
+  const { cancelHint } = voice;
+  const dismissHint = () => {
+    cancelHint();
+    hints.dismiss();
+  };
+  const reportHint = () => {
+    cancelHint();
+    hints.reportFalsePositive();
+  };
 
-  // Recordar la última URL usada. El almacenamiento puede no estar disponible.
   useEffect(() => {
     if (!allowBackendUrl) return;
     try {
@@ -62,15 +78,17 @@ export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boo
         overlay={
           <>
             {showDetails && <BoxesLayer videoRef={camera.videoRef} boxes={boxes} />}
-            <HudOverlay
-              captureStatus={capture.status}
-              result={capture.result}
-              live={live}
-              showDetails={showDetails}
+            <HudOverlay captureStatus={capture.status} result={capture.result} live={live} showDetails={showDetails} />
+            <HintBanner
+              hint={hints.hint}
+              status={hints.status}
+              onDismiss={dismissHint}
+              feedback={hints.feedback}
+              onFalsePositive={reportHint}
             />
           </>
         }
-      />      
+      />
       <CaptureControls
         capture={capture}
         live={live}
@@ -78,6 +96,7 @@ export function CameraPanel({ allowBackendUrl = false }: { allowBackendUrl?: boo
         showDetails={showDetails}
         onToggleDetails={() => setShowDetails((v) => !v)}
       />
+      <VoiceControls enabled={voiceEnabled} onEnabledChange={setVoiceEnabled} state={voice} onRetryPlayback={voice.retryPlayback} />
       <VoiceTestButton />
     </div>
   );

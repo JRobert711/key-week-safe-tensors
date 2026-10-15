@@ -92,7 +92,7 @@ export function useVoice() {
       const blob = await requestVoiceAudio({
         event_id: makeId(),
         session_id: sessionIdRef.current,
-        class_name: "cautin",
+        class_names: ["cautin"],
         transition_id: transitionId,
       }, { signal: controller.signal });
       if (!controller.signal.aborted && mountedRef.current) await playBlob(blob);
